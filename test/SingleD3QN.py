@@ -329,14 +329,14 @@ class AgentD3QN():  # D3QN: Dueling Double DQN
         self.criterion = torch.nn.SmoothL1Loss(reduction='none' if if_per else 'mean')
         self.get_obj_critic = self.get_obj_critic_per if if_per else self.get_obj_critic_raw
 
-    def select_action(self, state) -> int:  # for discrete action space
-        states = torch.as_tensor((state,), dtype=torch.float32, device=self.device).detach_()
-        a_prob = self.act.get_a_prob(states)[0]
-        if rd.rand() < self.explore_rate:  # epsilon-greedy
-            a_prob = a_prob.detach().numpy()  # choose action according to Q value
-            a_int = rd.choice(self.action_dim, p=a_prob)
+    @staticmethod  # cpu
+    def select_action(policy, state, explore_rate=0.25) -> int:  # for discrete action space
+        states = torch.as_tensor((state,), dtype=torch.float32).detach_()
+        a_prob = policy.get_a_prob(states)[0].detach().numpy()
+        if rd.rand() < explore_rate:  # epsilon-greedy
+            a_int = rd.choice(a_prob.shape[0], p=a_prob)
         else:
-            a_int = a_prob.argmax(dim=0).detach().numpy()
+            a_int = a_prob.argmax(axis=0)
         return a_int
 
     def update_net_multi_step(self, buffer, target_step, batch_size, repeat_times):
@@ -371,6 +371,11 @@ class AgentD3QN():  # D3QN: Dueling Double DQN
     def get_obj_critic_raw(self, buffer, batch_size):
         with torch.no_grad():
             reward, mask, action, state, next_s = buffer.sample_batch(batch_size)
+            reward = reward.to(self.device)
+            mask = mask.to(self.device)
+            action = action.to(self.device)
+            state = state.to(self.device)
+            next_s = next_s.to(self.device)
             next_q = torch.min(*self.cri_target.get_q1_q2(next_s))
             next_q = next_q.max(dim=1, keepdim=True)[0]
             q_label = reward + mask * next_q
@@ -648,7 +653,7 @@ default_config = {
         'batch_size': 2 ** 8,
         'policy_reuse': 2 ** 0,
         'interact_model': 'multi',
-        'random_explore_num': 40000,
+        'random_explore_num': 1000,
     },
     'buffer': {
         'max_buf': 2 ** 20,
@@ -805,6 +810,7 @@ def interact(config=default_config):
 
     ### interact one multi-step model
     elif interact_model == 'multi':
+        policy = agent.act.to('cpu') if next(agent.act.parameters()).is_cuda else agent.act
         while (total_step < break_step):
             start_time = time.time()
             ### explore env sample_size step
@@ -812,7 +818,7 @@ def interact(config=default_config):
             while actual_step < sample_size:
                 state = env.reset()
                 for i in range(env_max_step):
-                    action = agent.select_action(state)
+                    action = agent.select_action(policy, state, args.agent['explore_rate'])
                     next_s, reward, done, _ = env.step(action)
                     done = True if i == (env_max_step - 1) else done
                     buffer.append_buffer(state,
@@ -828,13 +834,15 @@ def interact(config=default_config):
                     state = next_s
             total_step += actual_step
             ### update agent
+            if not args.device_name == "cpu":
+                agent.to_device()
             algo_record = agent.update_net_multi_step(buffer=buffer,
                                                       target_step=actual_step,
                                                       batch_size=batch_size,
                                                       repeat_times=1)
+            policy = agent.act.to('cpu') if next(agent.act.parameters()).is_cuda else agent.act
             evaluator.update_totalstep(actual_step)
             ### evaluate in env
-            policy = agent.act.to('cpu') if next(agent.act.parameters()).is_cuda else agent.act
             for _ in range(evaluator.eval_times):
                 state = env.reset()
                 for _ in range(env_max_step):
@@ -862,7 +870,7 @@ def demo_test_d3qn():
         'cwd': None,
         'if_cwd_time': False,
         'random_seed': 0,
-        'gpu_id': -1,  # cpu
+        'gpu_id': 1,  # cpu
         # 'env': {
         #     'id': 'Acrobot-v1',
         #     'state_dim': 6,
@@ -900,8 +908,8 @@ def demo_test_d3qn():
             'if_per': False,  # for off policy
         },
         'evaluator': {
-            'eval_times': 1,  # for every rollout_worker
-            'break_step': 2e6,
+            'eval_times': 2,  # for every rollout_worker
+            'break_step': 1e6,
             'satisfy_reward_stop': False,
         }
     }
