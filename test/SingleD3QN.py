@@ -739,6 +739,7 @@ def interact(config=default_config):
     break_step = args.evaluator['break_step']
     sample_size = args.interactor['sample_size']
     batch_size = args.interactor['batch_size']
+    policy_reuse=args.interactor['policy_reuse']
     interact_model = args.interactor['interact_model']
 
     ### random explore
@@ -834,20 +835,20 @@ def interact(config=default_config):
                     state = next_s
             total_step += actual_step
             ### update agent
-            if not args.device_name == "cpu":
-                agent.to_device()
+            agent.to_device()
             algo_record = agent.update_net_multi_step(buffer=buffer,
                                                       target_step=actual_step,
                                                       batch_size=batch_size,
-                                                      repeat_times=1)
-            policy = agent.act.to('cpu') if next(agent.act.parameters()).is_cuda else agent.act
+                                                      repeat_times=policy_reuse)
+            policy = agent.act.to('cpu')
             evaluator.update_totalstep(actual_step)
             ### evaluate in env
             for _ in range(evaluator.eval_times):
                 state = env.reset()
-                for _ in range(env_max_step):
+                for i in range(env_max_step):
                     action = policy(torch.as_tensor((state,), dtype=torch.float32).detach_())
                     next_s, reward, done, _ = env.step(action.detach().numpy()[0])
+                    done = True if i == (env_max_step - 1) else done
                     record_episode.add_record(reward)
                     if done:
                         break
@@ -908,7 +909,7 @@ def demo_test_d3qn():
             'if_per': False,  # for off policy
         },
         'evaluator': {
-            'eval_times': 2,  # for every rollout_worker
+            'eval_times': 4,  # for every rollout_worker
             'break_step': 1e6,
             'satisfy_reward_stop': False,
         }
