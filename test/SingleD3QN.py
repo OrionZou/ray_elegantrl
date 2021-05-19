@@ -722,6 +722,7 @@ def interact(config=default_config):
     args.init_before_training()
     agent = args.agent['class_name'](args=args)
     env = make_env(args.env, args.random_seed)
+    eval_env=make_env(args.env, args.random_seed)
     agent.init(net_dim=args.agent['net_dim'],
                state_dim=args.env['state_dim'],
                action_dim=args.env['action_dim'],
@@ -844,10 +845,10 @@ def interact(config=default_config):
             evaluator.update_totalstep(actual_step)
             ### evaluate in env
             for _ in range(evaluator.eval_times):
-                state = env.reset()
+                state = eval_env.reset()
                 for i in range(env_max_step):
                     action = policy(torch.as_tensor((state,), dtype=torch.float32).detach_())
-                    next_s, reward, done, _ = env.step(action.detach().numpy()[0])
+                    next_s, reward, done, _ = eval_env.step(action.detach().numpy()[0])
                     done = True if i == (env_max_step - 1) else done
                     record_episode.add_record(reward)
                     if done:
