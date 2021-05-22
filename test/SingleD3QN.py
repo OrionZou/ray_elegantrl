@@ -592,7 +592,7 @@ class Evaluator():
 
     def tb_algo(self, algo_record):
         for k, v in algo_record.items():
-            self.writer.add_scalar(f'algor/{k}', v, self.total_step - self.curr_step)
+            self.writer.add_scalar(f'algo/{k}', v, self.total_step - self.curr_step)
 
     def tb_train(self):
         for k in self.train_record.keys():
@@ -647,6 +647,7 @@ default_config = {
     'if_cwd_time': True,
     'random_seed': 0,
     'gpu_id': -1,  # cpu
+    'load_buffer_path': None,
     'env': {
         'id': '',
         'state_dim': 0,
@@ -693,6 +694,7 @@ class Arguments:
         self.if_cwd_time = config['if_cwd_time'] if 'cwd' in config.keys() else False
         # initialize random seed in self.init_before_training()
         self.random_seed = config['random_seed']
+        self.load_buffer_path = config['load_buffer_path'] if 'load_buffer_path' in config.keys() else None
 
         # id state_dim action_dim reward_dim target_reward horizon_step
         self.env = config['env']
@@ -712,7 +714,8 @@ class Arguments:
                 curr_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
             else:
                 curr_time = 'current'
-            self.cwd = f'./logs/{self.env["id"]}-{self.agent["agent_name"]}/exp_{curr_time}_{self.device_name}'
+            self.cwd = f'./logs/{self.env["id"]}-{self.agent["agent_name"]}/' \
+                       f'exp_{self.interactor["interact_model"]}_{curr_time}_{self.device_name}'
 
         import shutil  # remove history according to bool(if_remove)
         shutil.rmtree(self.cwd, ignore_errors=True)
@@ -760,25 +763,25 @@ def interact(config=default_config):
     interact_model = args.interactor['interact_model']
 
     ### random explore
-
-    # actual_step = 0
-    # while actual_step < random_explore_num:
-    #     state = env.reset()
-    #     for i in range(env_max_step):
-    #         action = env.action_space.sample()
-    #         next_s, reward, done, _ = env.step(action)
-    #         done = True if i == (env_max_step - 1) else done
-    #         buffer.append_buffer(state,
-    #                              action,
-    #                              reward * reward_scale,
-    #                              0.0 if done else gamma)
-    #         if done:
-    #             break
-    #         state = next_s
-    #     actual_step += i
-    # buffer.save_buffer(file_name='buffer_random_explore')
-    buffer.load_buffer(
-        "/home/zgy/repos/ray_elegantrl/test/logs/LunarLander-v2-AgentD3QN/exp_current_cuda:1/buffer_random_explore")
+    if args.load_buffer_path is None:
+        actual_step = 0
+        while actual_step < random_explore_num:
+            state = env.reset()
+            for i in range(env_max_step):
+                action = env.action_space.sample()
+                next_s, reward, done, _ = env.step(action)
+                done = True if i == (env_max_step - 1) else done
+                buffer.append_buffer(state,
+                                     action,
+                                     reward * reward_scale,
+                                     0.0 if done else gamma)
+                if done:
+                    break
+                state = next_s
+            actual_step += i
+        buffer.save_buffer(file_name='buffer_random_explore')
+    else:
+        buffer.load_buffer(args.load_buffer_path)
 
     total_step = 0
     record_episode = RecordEpisode()
@@ -786,53 +789,64 @@ def interact(config=default_config):
     if interact_model == 'one':
         start_time = time.time()
         state = env.reset()
+        agent.to_cpu()
         while (total_step < break_step):
-            action = agent.select_action(state)
-            next_s, reward, done, _ = env.step(action)
-            buffer.append_buffer(state,
-                                 action,
-                                 reward * reward_scale,
-                                 0.0 if done else gamma)
-            if_record = total_step % sample_size == 0
-            if done:
-                state = env.reset()
-                evaluator.add_train_record(record_episode.get_result())
-                record_episode.clear()
-            else:
-                state = next_s
-            if if_record:
-                evaluator.update_totalstep(sample_size)
-                algo_record = agent.update_net_one_step(buffer, batch_size, if_record=if_record)
-                ### evaluate in env
-                policy = agent.act.to('cpu') if next(agent.act.parameters()).is_cuda else agent.act
-                for _ in range(evaluator.eval_times):
+            for i in range(env_max_step):
+                total_step += 1
+                action = agent.select_action(agent.act, state)
+                next_s, reward, done, _ = env.step(action)
+                done = True if i == (env_max_step - 1) else done
+                buffer.append_buffer(state,
+                                     action,
+                                     reward * reward_scale,
+                                     0.0 if done else gamma)
+                record_episode.add_record(reward)
+                if_record = total_step % sample_size == 0
+                if done:
                     state = env.reset()
-                    for _ in range(args.env['max_step']):
-                        action = policy(torch.as_tensor((state,), dtype=torch.float32).detach_())
-                        next_s, reward, done, _ = env.step(action.detach().numpy()[0])
-                        record_episode.add_record(reward)
-                        if done:
-                            break
-                        state = next_s
+                    evaluator.add_train_record(record_episode.get_result())
+                    record_episode.clear()
+                else:
+                    state = next_s
+                ### update agent network
+                agent.to_device()
+                algo_record = agent.update_net_one_step(buffer, batch_size, if_record=if_record)
+                agent.to_cpu()
+
+                if if_record:
+                    evaluator.update_totalstep(sample_size)
+                    ### evaluate in env
+                    for _ in range(evaluator.eval_times):
+                        state = eval_env.reset()
+                        for i in range(env_max_step):
+                            action = agent.act(torch.as_tensor((state,), dtype=torch.float32).detach_())
+                            next_s, reward, done, _ = eval_env.step(action.detach().numpy()[0])
+                            done = True if i == (env_max_step - 1) else done
+                            record_episode.add_record(reward)
+                            if done:
+                                break
+                            state = next_s
                         evaluator.add_eval_record(record_episode.get_result())
                         record_episode.clear()
 
-                ### record in tb
-                evaluator.analyze_result()
-                evaluator.tb_train()
-                evaluator.tb_eval()
-                evaluator.tb_algo(algo_record)
-                evaluator.iter_print(algo_record, evaluator.eval_record, (time.time() - start_time))
-                evaluator.save_model(agent)
-                evaluator.clear_train_and_eval_record()
-                start_time = time.time()
-            else:
-                agent.update_net_one_step(buffer, batch_size, if_record=if_record)
-            total_step += 1
+                    ### record in tb
+                    evaluator.analyze_result()
+                    evaluator.tb_train()
+                    evaluator.tb_eval()
+                    evaluator.tb_algo(algo_record)
+                    evaluator.iter_print(algo_record, evaluator.eval_record, (time.time() - start_time))
+                    evaluator.save_model(agent)
+                    evaluator.clear_train_and_eval_record()
+                    start_time = time.time()
+
+                if done:
+                    break
+
+
 
     ### interact one multi-step model
     elif interact_model == 'multi':
-        policy = agent.act.to('cpu') if next(agent.act.parameters()).is_cuda else agent.act
+        agent.to_cpu()
         while (total_step < break_step):
             start_time = time.time()
             ### explore env sample_size step
@@ -840,7 +854,7 @@ def interact(config=default_config):
             while actual_step < sample_size:
                 state = env.reset()
                 for i in range(env_max_step):
-                    action = agent.select_action(policy, state, args.agent['explore_rate'])
+                    action = agent.select_action(agent.act, state, args.agent['explore_rate'])
                     next_s, reward, done, _ = env.step(action)
                     done = True if i == (env_max_step - 1) else done
                     buffer.append_buffer(state,
@@ -861,13 +875,13 @@ def interact(config=default_config):
                                                       target_step=actual_step,
                                                       batch_size=batch_size,
                                                       repeat_times=policy_reuse)
-            policy = agent.act.to('cpu')
+            agent.to_cpu()
             evaluator.update_totalstep(actual_step)
             ### evaluate in env
             for _ in range(evaluator.eval_times):
                 state = eval_env.reset()
                 for i in range(env_max_step):
-                    action = policy(torch.as_tensor((state,), dtype=torch.float32).detach_())
+                    action = agent.act(torch.as_tensor((state,), dtype=torch.float32).detach_())
                     next_s, reward, done, _ = eval_env.step(action.detach().numpy()[0])
                     done = True if i == (env_max_step - 1) else done
                     record_episode.add_record(reward)
@@ -887,12 +901,13 @@ def interact(config=default_config):
             evaluator.clear_train_and_eval_record()
 
 
-def demo_test_d3qn():
+def demo_test_multi_step_d3qn():
     d3qn_config = {
         'cwd': None,
         'if_cwd_time': True,
         'random_seed': 0,
-        'gpu_id': 1,  # cpu
+        'gpu_id': 1,  # <0 cpu
+        'load_buffer_path': None,
         # 'env': {
         #     'id': 'Acrobot-v1',
         #     'state_dim': 6,
@@ -938,5 +953,58 @@ def demo_test_d3qn():
     interact(d3qn_config)
 
 
+def demo_test_one_step_d3qn():
+    d3qn_config = {
+        'cwd': None,
+        'if_cwd_time': False,
+        'random_seed': 0,
+        'gpu_id': 1,  # <0 cpu
+        'load_buffer_path': None,
+        # 'env': {
+        #     'id': 'Acrobot-v1',
+        #     'state_dim': 6,
+        #     'action_dim': 3,
+        #     'if_discrete_action': True,
+        #     'target_reward': 0,
+        #     'max_step': 1000,
+        # },
+        'env': {
+            'id': 'LunarLander-v2',
+            'state_dim': 8,
+            'action_dim': 4,
+            'if_discrete_action': True,
+            'target_reward': 0,
+            'max_step': 500,
+        },
+        'agent': {
+            'class_name': AgentD3QN,
+            'explore_rate': 0.25,
+            'learning_rate': 1e-4,
+            'soft_update_tau': 2 ** -8,
+            'net_dim': 2 ** 8,
+        },
+        'interactor': {
+            'sample_size': 1000,
+            'reward_scale': 2 ** 0,
+            'gamma': 0.99,
+            'batch_size': 2 ** 8,
+            'policy_reuse': 2 ** 1,  # no work
+            'interact_model': 'one',
+            'random_explore_num': 1000,
+        },
+        'buffer': {
+            'max_buf': 2 ** 20,
+            'if_per': False,  # for off policy
+        },
+        'evaluator': {
+            'eval_times': 4,  # for every rollout_worker
+            'break_step': 1e6,
+            'satisfy_reward_stop': False,
+        }
+    }
+    interact(d3qn_config)
+
+
 if __name__ == '__main__':
-    demo_test_d3qn()
+    demo_test_multi_step_d3qn()
+    demo_test_one_step_d3qn()
