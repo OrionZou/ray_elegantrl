@@ -164,8 +164,6 @@ class ReplayBuffer:
         `int max_len` the maximum capacity of ReplayBuffer. First In First Out
         `int state_dim` the dimension of state
         `int action_dim` the dimension of action (action_dim==1 for discrete action)
-        `bool if_on_policy` on-policy or off-policy
-        `bool if_gpu` create buffer space on CPU RAM or GPU
         `bool if_per` Prioritized Experience Replay for sparse reward
         """
         self.cwd = cwd
@@ -176,25 +174,25 @@ class ReplayBuffer:
         self.if_full = False
         self.action_dim = action_dim
         self.if_per = if_per
-
+        self.if_save_buffer = False
         if if_per:
             self.tree = BinarySearchTree(max_len)
 
         self.buf_state = torch.empty((max_len, state_dim), dtype=torch.float32, device=self.device)
         self.buf_action = torch.empty((max_len, action_dim), dtype=torch.float32, device=self.device)
         self.buf_reward = torch.empty((max_len, 1), dtype=torch.float32, device=self.device)
-        self.buf_gamma = torch.empty((max_len, 1), dtype=torch.float32, device=self.device)
+        self.buf_mask = torch.empty((max_len, 1), dtype=torch.float32, device=self.device)
 
-    def append_buffer(self, state, action, reward, gamma):  # CPU array to CPU array
+    def append_buffer(self, state, action, reward, mask):  # CPU array to CPU array
         state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
         reward = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
-        gamma = torch.as_tensor(gamma, dtype=torch.float32, device=self.device)
+        mask = torch.as_tensor(mask, dtype=torch.float32, device=self.device)
 
         self.buf_state[self.next_idx] = state
         self.buf_action[self.next_idx] = action
         self.buf_reward[self.next_idx] = reward
-        self.buf_gamma[self.next_idx] = gamma
+        self.buf_mask[self.next_idx] = mask
 
         if self.if_per:
             self.tree.update_id(self.next_idx)
@@ -204,11 +202,16 @@ class ReplayBuffer:
             self.if_full = True
             self.next_idx = 0
 
-    def extend_buffer(self, state, action, reward, gamma):  # CPU array to CPU array
+        if self.if_full:
+            if not self.if_save_buffer:
+                self.save_buffer()
+                self.if_save_buffer = True
+
+    def extend_buffer(self, state, action, reward, mask):  # CPU array to CPU array
         state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
         reward = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
-        gamma = torch.as_tensor(gamma, dtype=torch.float32, device=self.device)
+        mask = torch.as_tensor(mask, dtype=torch.float32, device=self.device)
 
         size = len(state)
         next_idx = self.next_idx + size
@@ -222,19 +225,19 @@ class ReplayBuffer:
                 self.buf_state[self.next_idx:self.max_len] = state[:self.max_len - self.next_idx]
                 self.buf_action[self.next_idx:self.max_len] = action[:self.max_len - self.next_idx]
                 self.buf_reward[self.next_idx:self.max_len] = reward[:self.max_len - self.next_idx]
-                self.buf_gamma[self.next_idx:self.max_len] = gamma[:self.max_len - self.next_idx]
+                self.buf_mask[self.next_idx:self.max_len] = mask[:self.max_len - self.next_idx]
             self.if_full = True
             next_idx = next_idx - self.max_len
 
             self.buf_state[0:next_idx] = state[-next_idx:]
             self.buf_action[0:next_idx] = action[-next_idx:]
             self.buf_reward[0:next_idx] = reward[-next_idx:]
-            self.buf_gamma[0:next_idx] = gamma[-next_idx:]
+            self.buf_mask[0:next_idx] = mask[-next_idx:]
         else:
             self.buf_state[self.next_idx:next_idx] = state
             self.buf_action[self.next_idx:next_idx] = action
             self.buf_reward[self.next_idx:next_idx] = reward
-            self.buf_gamma[self.next_idx:next_idx] = gamma
+            self.buf_mask[self.next_idx:next_idx] = mask
         self.next_idx = next_idx
 
     def sample_batch(self, batch_size) -> tuple:
@@ -254,7 +257,7 @@ class ReplayBuffer:
             indices, is_weights = self.tree.get_indices_is_weights(batch_size, beg, end)
 
             return (self.buf_reward[indices],
-                    self.buf_gamma[indices],
+                    self.buf_mask[indices],
                     self.buf_action[indices],
                     self.buf_state[indices],
                     self.buf_state[indices + 1],
@@ -262,24 +265,10 @@ class ReplayBuffer:
         else:
             indices = torch.randint(self.now_len - 1, size=(batch_size,), device=self.device)
             return (self.buf_reward[indices],
-                    self.buf_gamma[indices],
+                    self.buf_mask[indices],
                     self.buf_action[indices],
                     self.buf_state[indices],
                     self.buf_state[indices + 1])
-
-    def sample_all(self) -> tuple:
-        """sample all the data in ReplayBuffer (for on-policy)
-
-        :return torch.Tensor reward: reward.shape==(now_len, 1)
-        :return torch.Tensor mask:   mask.shape  ==(now_len, 1), mask = 0.0 if done else gamma
-        :return torch.Tensor action: action.shape==(now_len, action_dim)
-        :return torch.Tensor noise:  noise.shape ==(now_len, action_dim)
-        :return torch.Tensor state:  state.shape ==(now_len, state_dim)
-        """
-        return (torch.as_tensor(self.buf_reward[:self.now_len], device=self.device),
-                torch.as_tensor(self.buf_gamma[:self.now_len], device=self.device),
-                torch.as_tensor(self.buf_action[:self.now_len], device=self.device),
-                torch.as_tensor(self.buf_state[:self.now_len], device=self.device))
 
     def update_now_len_before_sample(self):
         """update the a pointer `now_len`, which is the current data number of ReplayBuffer
@@ -293,11 +282,38 @@ class ReplayBuffer:
         self.now_len = 0
         self.if_full = False
 
-    def save_buffer(self):
-        pass
+    def save_buffer(self, file_name='buffer_data'):
+        self.update_now_len_before_sample()
+        os.makedirs(self.cwd + '/' + file_name, exist_ok=True)
+        np.save(self.cwd + '/' + file_name + '/state', self.buf_state[:self.now_len].detach().numpy())
+        np.save(self.cwd + '/' + file_name + '/action', self.buf_action[:self.now_len].detach().numpy())
+        np.save(self.cwd + '/' + file_name + '/reward', self.buf_reward[:self.now_len].detach().numpy())
+        np.save(self.cwd + '/' + file_name + '/mask', self.buf_mask[:self.now_len].detach().numpy())
+        print("Saved " + file_name + " in " + self.cwd)
 
-    def read_buffer(self):
-        pass
+    def load_buffer(self, file_path):
+        state = np.load(file_path + '/state.npy')
+        action = np.load(file_path + '/action.npy')
+        reward = np.load(file_path + '/reward.npy')
+        mask = np.load(file_path + '/mask.npy')
+        if state.shape[0] >= self.max_len:
+            print(f"Buffer len is too short, update max_len with {state.shape[0]}/" + file_name + "/")
+            self.now_len = self.max_len = state.shape[0]
+            self.next_idx = 0
+            self.if_full = True
+            self.buf_state = torch.tensor(state, dtype=torch.float32, device=self.device)
+            self.buf_action = torch.tensor(action, dtype=torch.float32, device=self.device)
+            self.buf_reward = torch.tensor(reward, dtype=torch.float32, device=self.device)
+            self.buf_mask = torch.tensor(mask, dtype=torch.float32, device=self.device)
+        else:
+            self.now_len = state.shape[0]
+            self.next_idx = self.now_len
+            self.if_full = False
+            self.buf_state[:state.shape[0], :] = torch.tensor(state, dtype=torch.float32, device=self.device)
+            self.buf_action[:state.shape[0], :] = torch.tensor(action, dtype=torch.float32, device=self.device)
+            self.buf_reward[:state.shape[0], :] = torch.tensor(reward, dtype=torch.float32, device=self.device)
+            self.buf_mask[:state.shape[0], :] = torch.tensor(mask, dtype=torch.float32, device=self.device)
+        print("Loaded" + file_path)
 
 
 class AgentD3QN():  # D3QN: Dueling Double DQN
@@ -599,7 +615,7 @@ class Evaluator():
         print_info += " |"
         print(print_info)
         print_info = f"|{self.total_step:8.2e}  {self.curr_max_return:8.2f}|" + \
-                     f"{eval_record['episode']['return']['avg']:8.2f}  {eval_record['episode']['return']['avg']:8.2f}" + \
+                     f"{eval_record['episode']['return']['avg']:8.2f}  {eval_record['episode']['return']['std']:8.2f}" + \
                      f"{eval_record['total']['step']['avg']:6.0f}  {eval_record['total']['step']['std']:4.0f} |"
         for key in algo_record.keys():
             print_info += f"{algo_record[key]:8.2f}"
@@ -722,7 +738,7 @@ def interact(config=default_config):
     args.init_before_training()
     agent = args.agent['class_name'](args=args)
     env = make_env(args.env, args.random_seed)
-    eval_env=make_env(args.env, args.random_seed)
+    eval_env = make_env(args.env, args.random_seed)
     agent.init(net_dim=args.agent['net_dim'],
                state_dim=args.env['state_dim'],
                action_dim=args.env['action_dim'],
@@ -740,25 +756,29 @@ def interact(config=default_config):
     break_step = args.evaluator['break_step']
     sample_size = args.interactor['sample_size']
     batch_size = args.interactor['batch_size']
-    policy_reuse=args.interactor['policy_reuse']
+    policy_reuse = args.interactor['policy_reuse']
     interact_model = args.interactor['interact_model']
 
     ### random explore
-    actual_step = 0
-    while actual_step < random_explore_num:
-        state = env.reset()
-        for i in range(env_max_step):
-            action = env.action_space.sample()
-            next_s, reward, done, _ = env.step(action)
-            done = True if i == (env_max_step - 1) else done
-            buffer.append_buffer(state,
-                                 action,
-                                 reward * reward_scale,
-                                 0.0 if done else gamma)
-            if done:
-                break
-            state = next_s
-        actual_step += i
+
+    # actual_step = 0
+    # while actual_step < random_explore_num:
+    #     state = env.reset()
+    #     for i in range(env_max_step):
+    #         action = env.action_space.sample()
+    #         next_s, reward, done, _ = env.step(action)
+    #         done = True if i == (env_max_step - 1) else done
+    #         buffer.append_buffer(state,
+    #                              action,
+    #                              reward * reward_scale,
+    #                              0.0 if done else gamma)
+    #         if done:
+    #             break
+    #         state = next_s
+    #     actual_step += i
+    # buffer.save_buffer(file_name='buffer_random_explore')
+    buffer.load_buffer(
+        "/home/zgy/repos/ray_elegantrl/test/logs/LunarLander-v2-AgentD3QN/exp_current_cuda:1/buffer_random_explore")
 
     total_step = 0
     record_episode = RecordEpisode()
@@ -870,7 +890,7 @@ def interact(config=default_config):
 def demo_test_d3qn():
     d3qn_config = {
         'cwd': None,
-        'if_cwd_time': False,
+        'if_cwd_time': True,
         'random_seed': 0,
         'gpu_id': 1,  # cpu
         # 'env': {
