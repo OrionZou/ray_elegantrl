@@ -956,7 +956,7 @@ def demo_test_multi_step_d3qn():
 def demo_test_one_step_d3qn():
     d3qn_config = {
         'cwd': None,
-        'if_cwd_time': False,
+        'if_cwd_time': True,
         'random_seed': 0,
         'gpu_id': 1,  # <0 cpu
         'load_buffer_path': None,
@@ -984,7 +984,7 @@ def demo_test_one_step_d3qn():
             'net_dim': 2 ** 8,
         },
         'interactor': {
-            'sample_size': 1000,
+            'sample_size': 1000,  # evaluation gap
             'reward_scale': 2 ** 0,
             'gamma': 0.99,
             'batch_size': 2 ** 8,
@@ -1006,5 +1006,6 @@ def demo_test_one_step_d3qn():
 
 
 if __name__ == '__main__':
-    demo_test_multi_step_d3qn()
+    # demo_test_multi_step_d3qn()
+
     demo_test_one_step_d3qn()
