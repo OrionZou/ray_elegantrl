@@ -297,7 +297,7 @@ class ReplayBuffer:
         reward = np.load(file_path + '/reward.npy')
         mask = np.load(file_path + '/mask.npy')
         if state.shape[0] >= self.max_len:
-            print(f"Buffer len is too short, update max_len with {state.shape[0]}/" + file_name + "/")
+            print(f"Buffer len is too short, update max_len with {state.shape[0]}")
             self.now_len = self.max_len = state.shape[0]
             self.next_idx = 0
             self.if_full = True
@@ -313,7 +313,7 @@ class ReplayBuffer:
             self.buf_action[:state.shape[0], :] = torch.tensor(action, dtype=torch.float32, device=self.device)
             self.buf_reward[:state.shape[0], :] = torch.tensor(reward, dtype=torch.float32, device=self.device)
             self.buf_mask[:state.shape[0], :] = torch.tensor(mask, dtype=torch.float32, device=self.device)
-        print("Loaded" + file_path)
+        print("Loaded in " + file_path)
 
 
 class AgentD3QN():  # D3QN: Dueling Double DQN
