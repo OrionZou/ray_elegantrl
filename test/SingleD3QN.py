@@ -356,7 +356,6 @@ class AgentD3QN():  # D3QN: Dueling Double DQN
         return a_int
 
     def update_net_multi_step(self, buffer, target_step, batch_size, repeat_times):
-        q_value = obj_critic = None
         for i in range(int(target_step * repeat_times)):
             if_record = True if i == (int(target_step * repeat_times) - 1) else False
             train_record = self.update_net_one_step(buffer, batch_size, if_record)
