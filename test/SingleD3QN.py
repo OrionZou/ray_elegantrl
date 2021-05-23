@@ -340,9 +340,9 @@ class AgentD3QN():  # D3QN: Dueling Double DQN
         self.cri_target = deepcopy(self.cri)
         self.act = self.cri
 
-        self.criterion = torch.nn.SmoothL1Loss(reduction='none') if if_per else torch.nn.SmoothL1Loss()
         self.cri_optimizer = torch.optim.Adam(self.act.parameters(), lr=self.learning_rate)
         self.criterion = torch.nn.SmoothL1Loss(reduction='none' if if_per else 'mean')
+        # self.criterion = torch.nn.SmoothL1Loss(reduction='none')
         self.get_obj_critic = self.get_obj_critic_per if if_per else self.get_obj_critic_raw
 
     @staticmethod  # cpu
@@ -356,18 +356,25 @@ class AgentD3QN():  # D3QN: Dueling Double DQN
         return a_int
 
     def update_net_multi_step(self, buffer, target_step, batch_size, repeat_times):
-        buffer.update_now_len_before_sample()
-
         q_value = obj_critic = None
-        for _ in range(int(target_step * repeat_times)):
-            obj_critic, q_value = self.get_obj_critic(buffer, batch_size)
+        for i in range(int(target_step * repeat_times)):
+            if_record = True if i == (int(target_step * repeat_times) - 1) else False
+            train_record = self.update_net_one_step(buffer, batch_size, if_record)
+        return train_record
 
-            self.cri_optimizer.zero_grad()
-            obj_critic.backward()
-            self.cri_optimizer.step()
-            self.soft_update(self.cri_target, self.cri, self.soft_update_tau)
-        self.train_record.update(obj_a=q_value.mean().item(), obj_c=obj_critic.item())
-        return self.train_record
+    # def update_net_multi_step(self, buffer, target_step, batch_size, repeat_times):
+    #     buffer.update_now_len_before_sample()
+    #
+    #     q_value = obj_critic = None
+    #     for _ in range(int(target_step * repeat_times)):
+    #         obj_critic, q_value = self.get_obj_critic(buffer, batch_size)
+    #
+    #         self.cri_optimizer.zero_grad()
+    #         obj_critic.backward()
+    #         self.cri_optimizer.step()
+    #         self.soft_update(self.cri_target, self.cri, self.soft_update_tau)
+    #     self.train_record.update(obj_a=q_value.mean().item(), obj_c=obj_critic.item())
+    #     return self.train_record
 
     def update_net_one_step(self, buffer, batch_size, if_record):
         buffer.update_now_len_before_sample()
@@ -399,6 +406,24 @@ class AgentD3QN():  # D3QN: Dueling Double DQN
         q1, q2 = [qs.gather(1, act_int) for qs in self.act.get_q1_q2(state)]
         obj_critic = self.criterion(q1, q_label) + self.criterion(q2, q_label)
         return obj_critic, q1
+
+    # def get_obj_critic_raw(self, buffer, batch_size):  # IS
+    #     with torch.no_grad():
+    #         reward, mask, action, state, next_s = buffer.sample_batch(batch_size)
+    #         reward = reward.to(self.device)
+    #         mask = mask.to(self.device)
+    #         action = action.to(self.device)
+    #         state = state.to(self.device)
+    #         next_s = next_s.to(self.device)
+    #         next_q = torch.min(*self.cri_target.get_q1_q2(next_s))
+    #         next_q = next_q.max(dim=1, keepdim=True)[0]
+    #         q_label = reward + mask * next_q
+    #     act_int = action.type(torch.long)
+    #     q1, q2 = [qs.gather(1, act_int) for qs in self.act.get_q1_q2(state)]
+    #     ratio = (self.cri.get_a_prob(state).log() - self.cri_target.get_a_prob(state).log()).exp()
+    #     obj_critic = (
+    #             self.criterion(q1, q_label) + self.criterion(q2, q_label) * ratio.clamp(1 - 0.25, 1 + 0.25)).mean()
+    #     return obj_critic, q1
 
     def get_obj_critic_per(self, buffer, batch_size):
         with torch.no_grad():
@@ -785,15 +810,16 @@ def interact(config=default_config):
 
     total_step = 0
     record_episode = RecordEpisode()
-    ### interact one step model todo
+    ### interact one step model
     if interact_model == 'one':
         start_time = time.time()
-        state = env.reset()
         agent.to_cpu()
         while (total_step < break_step):
+            if_record = False
+            state = env.reset()
             for i in range(env_max_step):
                 total_step += 1
-                action = agent.select_action(agent.act, state)
+                action = agent.select_action(agent.act, state, explore_rate=args.agent['explore_rate'])
                 next_s, reward, done, _ = env.step(action)
                 done = True if i == (env_max_step - 1) else done
                 buffer.append_buffer(state,
@@ -801,46 +827,46 @@ def interact(config=default_config):
                                      reward * reward_scale,
                                      0.0 if done else gamma)
                 record_episode.add_record(reward)
-                if_record = total_step % sample_size == 0
-                if done:
-                    state = env.reset()
-                    evaluator.add_train_record(record_episode.get_result())
-                    record_episode.clear()
-                else:
-                    state = next_s
+                if_record = True if total_step % sample_size == 0 else if_record
                 ### update agent network
+                buffer.update_now_len_before_sample()
                 agent.to_device()
                 algo_record = agent.update_net_one_step(buffer, batch_size, if_record=if_record)
                 agent.to_cpu()
 
-                if if_record:
-                    evaluator.update_totalstep(sample_size)
-                    ### evaluate in env
-                    for _ in range(evaluator.eval_times):
-                        state = eval_env.reset()
-                        for i in range(env_max_step):
-                            action = agent.act(torch.as_tensor((state,), dtype=torch.float32).detach_())
-                            next_s, reward, done, _ = eval_env.step(action.detach().numpy()[0])
-                            done = True if i == (env_max_step - 1) else done
-                            record_episode.add_record(reward)
-                            if done:
-                                break
-                            state = next_s
-                        evaluator.add_eval_record(record_episode.get_result())
-                        record_episode.clear()
-
-                    ### record in tb
-                    evaluator.analyze_result()
-                    evaluator.tb_train()
-                    evaluator.tb_eval()
-                    evaluator.tb_algo(algo_record)
-                    evaluator.iter_print(algo_record, evaluator.eval_record, (time.time() - start_time))
-                    evaluator.save_model(agent)
-                    evaluator.clear_train_and_eval_record()
-                    start_time = time.time()
-
                 if done:
+                    evaluator.add_train_record(record_episode.get_result())
+                    record_episode.clear()
                     break
+                state = next_s
+
+            if if_record:
+                if_record = False
+                evaluator.update_totalstep(sample_size)
+                ### evaluate in env
+                for _ in range(evaluator.eval_times):
+                    state = eval_env.reset()
+                    for i in range(env_max_step):
+                        action = agent.act(torch.as_tensor((state,), dtype=torch.float32).detach_())
+                        next_s, reward, done, _ = eval_env.step(action.detach().numpy()[0])
+                        done = True if i == (env_max_step - 1) else done
+                        record_episode.add_record(reward)
+                        if done:
+                            break
+                        state = next_s
+                    evaluator.add_eval_record(record_episode.get_result())
+                    record_episode.clear()
+
+                ### record in tb
+                evaluator.analyze_result()
+                evaluator.tb_train()
+                evaluator.tb_eval()
+                evaluator.tb_algo(algo_record)
+                evaluator.iter_print(algo_record, evaluator.eval_record, (time.time() - start_time))
+                evaluator.save_model(agent)
+                evaluator.clear_train_and_eval_record()
+                start_time = time.time()
+
 
 
 
@@ -854,7 +880,7 @@ def interact(config=default_config):
             while actual_step < sample_size:
                 state = env.reset()
                 for i in range(env_max_step):
-                    action = agent.select_action(agent.act, state, args.agent['explore_rate'])
+                    action = agent.select_action(agent.act, state, explore_rate=args.agent['explore_rate'])
                     next_s, reward, done, _ = env.step(action)
                     done = True if i == (env_max_step - 1) else done
                     buffer.append_buffer(state,
@@ -869,7 +895,8 @@ def interact(config=default_config):
                         break
                     state = next_s
             total_step += actual_step
-            ### update agent
+            ### update agent network
+            buffer.update_now_len_before_sample()
             agent.to_device()
             algo_record = agent.update_net_multi_step(buffer=buffer,
                                                       target_step=actual_step,
