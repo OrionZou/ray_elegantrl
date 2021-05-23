@@ -377,10 +377,7 @@ class AgentD3QN():  # D3QN: Dueling Double DQN
     #     return self.train_record
 
     def update_net_one_step(self, buffer, batch_size, if_record):
-        buffer.update_now_len_before_sample()
-
         obj_critic, q_value = self.get_obj_critic(buffer, batch_size)
-
         self.cri_optimizer.zero_grad()
         obj_critic.backward()
         self.cri_optimizer.step()
